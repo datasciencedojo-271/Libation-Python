@@ -38,7 +38,7 @@ pub fn configure_lame_options(
             96 => Bitrate::Kbps96,
             80 => Bitrate::Kbps80,
             64 => Bitrate::Kbps64,
-            56 => Bitrate::Kbps64, // Corrected typo
+            56 => Bitrate::Kbps64,
             48 => Bitrate::Kbps48,
             40 => Bitrate::Kbps40,
             32 => Bitrate::Kbps32,

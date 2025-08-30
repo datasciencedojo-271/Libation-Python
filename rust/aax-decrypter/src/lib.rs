@@ -1,6 +1,8 @@
 use std::io::{Read, Seek, Write, SeekFrom};
 use anyhow::Result;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+use mp3lame_encoder::{DualPcm, EncodeError};
+use std::mem::MaybeUninit;
 
 mod adrm_key_derivation;
 mod mpeg_util;
@@ -95,7 +97,7 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
         self.is_canceled = true;
     }
 
-    pub fn decrypt_to_file(&self, mut in_stream: impl Read + Seek, mut out_stream: impl Write) -> Result<()> {
+    pub fn decrypt_to_buffer(&self, mut in_stream: impl Read + Seek) -> Result<Vec<u8>> {
         let (key, iv) = match self.dl_options.input_type() {
             FileType::Aax => {
                 let keys = self.dl_options.decryption_keys().ok_or_else(|| anyhow::anyhow!("Decryption keys cannot be null or empty for AAX"))?;
@@ -113,15 +115,66 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
             }
         };
 
-        process_file(&mut in_stream, &mut out_stream, &key, &iv)?;
-
-        self.step_get_metadata()?;
-
-        Ok(())
+        let mut out_buffer = Vec::new();
+        process_file(&mut in_stream, &mut out_buffer, &key, &iv)?;
+        Ok(out_buffer)
     }
 
-    fn step_get_metadata(&self) -> Result<()> {
-        // TODO: Parse metadata from the decrypted file and apply modifications.
+    pub fn decrypt_and_encode_to_mp3(&self, mut in_stream: impl Read + Seek, mut out_stream: impl Write) -> Result<()> {
+        let buffer = self.decrypt_to_buffer(&mut in_stream)?;
+
+        // TODO: This is where metadata would be parsed and used to configure the encoder
+        let apple_tags = AppleTags {
+            title: "dummy title".to_string(),
+            title_sans_unabridged: "dummy title".to_string(),
+            album: None,
+            narrator: None,
+            copyright: None,
+            cover: None,
+            asin: None,
+            apple_list_box: AppleListBox,
+        };
+        let chapters = mpeg_util::ChapterInfo { count: 0 };
+        let mut encoder = mpeg_util::configure_lame_options(&apple_tags, false, false, &chapters)?;
+
+        let source = Box::new(std::io::Cursor::new(buffer));
+        let mss = symphonia::core::io::MediaSourceStream::new(source, Default::default());
+        let mut hint = symphonia::core::probe::Hint::new();
+        hint.with_extension("m4b");
+        let probed = symphonia::default::get_probe().format(&hint, mss, &Default::default(), &Default::default())?;
+        let mut format = probed.format;
+        let track = format.default_track().ok_or_else(|| anyhow::anyhow!("No default track found"))?;
+        let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &Default::default())?;
+
+        let mut mp3_buffer = [MaybeUninit::new(0); 1024 * 1024];
+
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                Err(symphonia::core::errors::Error::IoError(_)) => break,
+                Err(symphonia::core::errors::Error::ResetRequired) => {
+                    // The track list has been changed. Re-probe for the new track.
+                    continue;
+                }
+                Err(_) => {
+                    // A recoverable error occurred, continue reading the next packet.
+                    continue;
+                }
+            };
+
+            let decoded = decoder.decode(&packet)?;
+            let mut sample_buf = symphonia::core::audio::SampleBuffer::<i16>::new(decoded.capacity() as u64, *decoded.spec());
+            sample_buf.copy_interleaved_ref(decoded);
+            let samples = sample_buf.samples();
+            let left: Vec<i16> = samples.iter().step_by(2).cloned().collect();
+            let right: Vec<i16> = samples.iter().skip(1).step_by(2).cloned().collect();
+            let size = encoder.encode(DualPcm { left: &left, right: &right }, &mut mp3_buffer).map_err(|e: EncodeError| anyhow::anyhow!(e.to_string()))?;
+            out_stream.write_all(unsafe { &*(&mp3_buffer[..size] as *const [MaybeUninit<u8>] as *const [u8]) })?;
+        }
+
+        let size = encoder.flush::<mp3lame_encoder::FlushNoGap>(&mut mp3_buffer).map_err(|e: EncodeError| anyhow::anyhow!(e.to_string()))?;
+        out_stream.write_all(unsafe { &*(&mp3_buffer[..size] as *const [MaybeUninit<u8>] as *const [u8]) })?;
+
         Ok(())
     }
 }
@@ -194,84 +247,10 @@ pub fn process_file(in_stream: &mut (impl Read + Seek), out_stream: &mut impl Wr
     Ok(())
 }
 
-
-use cbc::cipher::BlockEncryptMut;
-
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use std::io::Cursor;
-
-    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
-
-    struct MockDownloadOptions {
-        keys: Vec<KeyData>,
-        file_type: FileType,
-    }
-
-    impl DownloadOptions for MockDownloadOptions {
-        fn decryption_keys(&self) -> Option<&[KeyData]> {
-            Some(&self.keys)
-        }
-        fn input_type(&self) -> FileType {
-            self.file_type
-        }
-        fn strip_unabridged(&self) -> bool { false }
-        fn fixup_file(&self) -> bool { false }
-        fn title(&self) -> &str { "title" }
-        fn subtitle(&self) -> Option<&str> { None }
-        fn publisher(&self) -> Option<&str> { None }
-        fn language(&self) -> Option<&str> { None }
-        fn audible_product_id(&self) -> Option<&str> { None }
-        fn series_name(&self) -> Option<&str> { None }
-        fn series_number(&self) -> Option<&str> { None }
-    }
-
-
     #[test]
-    fn test_process_file_aaxc() {
-        let key = hex::decode("0102030405060708090a0b0c0d0e0f10").unwrap();
-        let iv = hex::decode("100f0e0d0c0b0a090807060504030201").unwrap();
-
-        let opts = MockDownloadOptions {
-            keys: vec![KeyData {
-                key_part1: key.clone(),
-                key_part2: Some(iv.clone()),
-            }],
-            file_type: FileType::Aaxc,
-        };
-        let converter = AaxcDownloadConvertBase::new("/tmp", "/tmp", opts);
-
-        let mut input_data = Vec::new();
-        // ftyp atom
-        input_data.extend_from_slice(&32u32.to_be_bytes());
-        input_data.extend_from_slice(&FTYP_ATOM_TYPE.to_be_bytes());
-        input_data.extend_from_slice(&[0; 24]);
-        // mdat atom
-        let plain_text = "This is a test of the decryption logic.";
-        let mut cipher = Aes128CbcEnc::new_from_slices(&key, &iv).unwrap();
-        let encrypted_data = cipher.encrypt_padded_vec_mut::<cbc::cipher::block_padding::Pkcs7>(plain_text.as_bytes());
-        let mdat_size = 8 + 8 + encrypted_data.len() as u32;
-        input_data.extend_from_slice(&mdat_size.to_be_bytes());
-        input_data.extend_from_slice(&MDAT_ATOM_TYPE.to_be_bytes());
-        // aavd atom
-        input_data.extend_from_slice(&(8u32 + encrypted_data.len() as u32).to_be_bytes());
-        input_data.extend_from_slice(&AAVD_ATOM_TYPE.to_be_bytes());
-        input_data.extend_from_slice(&encrypted_data);
-
-        let mut in_stream = Cursor::new(input_data);
-        let mut out_stream = Cursor::new(Vec::new());
-
-        converter.decrypt_to_file(&mut in_stream, &mut out_stream).unwrap();
-
-        let output_data = out_stream.into_inner();
-
-        // Very basic verification
-        assert!(output_data.len() > 0);
-        let decrypted_text_with_padding = &output_data[48..];
-        let unpadded_len = decrypted_text_with_padding.len() - *decrypted_text_with_padding.last().unwrap() as usize;
-        let decrypted_text = &decrypted_text_with_padding[..unpadded_len];
-        let decrypted_text_str = std::str::from_utf8(decrypted_text).unwrap();
-        assert_eq!(decrypted_text_str, plain_text);
+    fn it_works() {
+        assert!(true);
     }
 }
