@@ -55,7 +55,8 @@ fn main() -> Result<(), anyhow::Error> {
     let mut in_file = File::open(cli.input)?;
     let mut out_file = File::create(cli.output)?;
 
-    converter.decrypt_and_encode_to_mp3(&mut in_file, &mut out_file)?;
+    let _buffer = converter.decrypt_to_buffer(&mut in_file)?;
+    println!("Successfully decrypted to buffer.");
 
     Ok(())
 }

@@ -1,12 +1,13 @@
 use std::io::{Read, Seek, Write, SeekFrom};
 use anyhow::Result;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-use mp3lame_encoder::{DualPcm, EncodeError};
-use std::mem::MaybeUninit;
+use symphonia::core::meta::StandardTagKey;
 
 mod adrm_key_derivation;
 mod mpeg_util;
 mod atom;
+mod converter;
+mod cue;
 
 use atom::{Atom, AavdAtom};
 
@@ -120,62 +121,65 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
         Ok(out_buffer)
     }
 
-    pub fn decrypt_and_encode_to_mp3(&self, mut in_stream: impl Read + Seek, mut out_stream: impl Write) -> Result<()> {
-        let buffer = self.decrypt_to_buffer(&mut in_stream)?;
+    fn parse_metadata(&self, format: &mut dyn symphonia::core::formats::FormatReader) -> Result<AppleTags> {
+        let mut title = String::new();
+        let mut album = None;
+        let mut narrator = None;
+        let mut copyright = None;
+        let mut cover = None;
+        let mut asin = None;
 
-        // TODO: This is where metadata would be parsed and used to configure the encoder
-        let apple_tags = AppleTags {
-            title: "dummy title".to_string(),
-            title_sans_unabridged: "dummy title".to_string(),
-            album: None,
-            narrator: None,
-            copyright: None,
-            cover: None,
-            asin: None,
+        if let Some(metadata) = format.metadata().current() {
+            for tag in metadata.tags() {
+                if let Some(std_key) = &tag.std_key {
+                    match std_key {
+                        StandardTagKey::TrackTitle => title = tag.value.to_string(),
+                        StandardTagKey::Album => album = Some(tag.value.to_string()),
+                        StandardTagKey::Artist => narrator = Some(tag.value.to_string()),
+                        StandardTagKey::Copyright => copyright = Some(tag.value.to_string()),
+                        _ => {}
+                    }
+                }
+                if tag.key == "ASIN" {
+                    asin = Some(tag.value.to_string());
+                }
+            }
+        }
+
+        Ok(AppleTags {
+            title_sans_unabridged: title.replace(" (Unabridged)", ""),
+            title,
+            album,
+            narrator,
+            copyright,
+            cover,
+            asin,
             apple_list_box: AppleListBox,
-        };
-        let chapters = mpeg_util::ChapterInfo { count: 0 };
-        let mut encoder = mpeg_util::configure_lame_options(&apple_tags, false, false, &chapters)?;
+        })
+    }
 
-        let source = Box::new(std::io::Cursor::new(buffer));
+    fn step_get_metadata(&self, buffer: &[u8]) -> Result<AppleTags> {
+        let source = Box::new(std::io::Cursor::new(buffer.to_vec()));
         let mss = symphonia::core::io::MediaSourceStream::new(source, Default::default());
         let mut hint = symphonia::core::probe::Hint::new();
         hint.with_extension("m4b");
-        let probed = symphonia::default::get_probe().format(&hint, mss, &Default::default(), &Default::default())?;
-        let mut format = probed.format;
-        let track = format.default_track().ok_or_else(|| anyhow::anyhow!("No default track found"))?;
-        let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &Default::default())?;
+        let mut format = symphonia::default::get_probe().format(&hint, mss, &Default::default(), &Default::default())?.format;
 
-        let mut mp3_buffer = [MaybeUninit::new(0); 1024 * 1024];
+        let mut apple_tags = self.parse_metadata(&mut *format)?;
 
-        loop {
-            let packet = match format.next_packet() {
-                Ok(packet) => packet,
-                Err(symphonia::core::errors::Error::IoError(_)) => break,
-                Err(symphonia::core::errors::Error::ResetRequired) => {
-                    // The track list has been changed. Re-probe for the new track.
-                    continue;
-                }
-                Err(_) => {
-                    // A recoverable error occurred, continue reading the next packet.
-                    continue;
-                }
-            };
-
-            let decoded = decoder.decode(&packet)?;
-            let mut sample_buf = symphonia::core::audio::SampleBuffer::<i16>::new(decoded.capacity() as u64, *decoded.spec());
-            sample_buf.copy_interleaved_ref(decoded);
-            let samples = sample_buf.samples();
-            let left: Vec<i16> = samples.iter().step_by(2).cloned().collect();
-            let right: Vec<i16> = samples.iter().skip(1).step_by(2).cloned().collect();
-            let size = encoder.encode(DualPcm { left: &left, right: &right }, &mut mp3_buffer).map_err(|e: EncodeError| anyhow::anyhow!(e.to_string()))?;
-            out_stream.write_all(unsafe { &*(&mp3_buffer[..size] as *const [MaybeUninit<u8>] as *const [u8]) })?;
+        if self.dl_options.strip_unabridged() {
+            apple_tags.title = apple_tags.title_sans_unabridged.clone();
+            apple_tags.album = apple_tags.album.map(|a| a.replace(" (Unabridged)", ""));
         }
 
-        let size = encoder.flush::<mp3lame_encoder::FlushNoGap>(&mut mp3_buffer).map_err(|e: EncodeError| anyhow::anyhow!(e.to_string()))?;
-        out_stream.write_all(unsafe { &*(&mp3_buffer[..size] as *const [MaybeUninit<u8>] as *const [u8]) })?;
+        // TODO: Implement the rest of the metadata modifications from the C# code.
 
-        Ok(())
+        Ok(apple_tags)
+    }
+
+    pub fn process_book(&self, mut in_stream: impl Read + Seek) -> Result<AppleTags> {
+        let buffer = self.decrypt_to_buffer(&mut in_stream)?;
+        self.step_get_metadata(&buffer)
     }
 }
 
