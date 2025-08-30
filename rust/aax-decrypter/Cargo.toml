@@ -4,3 +4,16 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1.0.75"
+thiserror = "1.0.44"
+log = "0.4.20"
+uuid = { version = "1.4.1", features = ["v4"] }
+
+mp4 = "0.13.0"
+aes = "0.8.3"
+cbc = { version = "0.1.2", features = ["alloc"] }
+mp3lame-encoder = "0.2.1"
+byteorder = "1.4.3"
+sha1 = "0.10.5"
+hex = "0.4.3"
+itertools = "0.11.0"
