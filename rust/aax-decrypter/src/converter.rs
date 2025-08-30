@@ -34,8 +34,9 @@ impl<T: DownloadOptions> Converter<T> for AaxConverter<T> {
                 symphonia::core::units::Time::from(u64::MAX)
             };
 
-            // TODO: Create a new output stream for each chapter
-            let mut out_file = std::fs::File::create(format!("chapter_{}.mp3", i + 1))?;
+            let file_name = format!("{:02}_{}.mp3", i + 1, chapter.title.replace("/", "_"));
+            let out_path = self.base._out_directory.join(file_name);
+            let mut out_file = std::fs::File::create(out_path)?;
 
             mpeg_util::encode_to_mp3(&buffer, &mut out_file, &apple_tags, chapter.start_time, next_chapter_start)?;
         }

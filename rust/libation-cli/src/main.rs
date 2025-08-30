@@ -62,6 +62,7 @@ fn main() -> Result<(), anyhow::Error> {
 
     if cli.multi {
         // The output path is a directory for multi-file conversion
+        std::fs::create_dir_all(&cli.output)?;
         let _ = converter.convert_multi(&mut in_file, std::io::sink())?;
     } else {
         let mut out_file = File::create(cli.output)?;

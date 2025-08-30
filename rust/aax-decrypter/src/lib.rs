@@ -24,6 +24,11 @@ pub struct AppleTags {
     pub cover: Option<Vec<u8>>,
     pub asin: Option<String>,
     pub chapters: mpeg_util::ChapterInfo,
+    pub subtitle: Option<String>,
+    pub publisher: Option<String>,
+    pub language: Option<String>,
+    pub series_name: Option<String>,
+    pub series_number: Option<String>,
     // This was a complex object in C#, for now a placeholder
     pub apple_list_box: AppleListBox,
 }
@@ -164,8 +169,40 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
             cover,
             asin,
             chapters: mpeg_util::ChapterInfo { chapters },
+            subtitle: None,
+            publisher: None,
+            language: None,
+            series_name: None,
+            series_number: None,
             apple_list_box: AppleListBox,
         })
+    }
+
+    fn step_get_metadata_from_tags(&self, apple_tags: &mut AppleTags) -> Result<()> {
+        if self.dl_options.strip_unabridged() {
+            apple_tags.title = apple_tags.title_sans_unabridged.clone();
+            apple_tags.album = apple_tags.album.as_ref().map(|a| a.replace(" (Unabridged)", ""));
+        }
+
+        if self.dl_options.fixup_file() {
+            if let Some(narrator) = &apple_tags.narrator {
+                apple_tags.apple_list_box.edit_or_add_tag("©wrt", narrator);
+            }
+            if let Some(copyright) = &apple_tags.copyright {
+                apple_tags.copyright = Some(copyright.replace("(P)", "℗").replace("&#169;", "©"));
+            }
+            apple_tags.title = self.dl_options.title().to_string();
+            apple_tags.subtitle = self.dl_options.subtitle().map(|s| s.to_string());
+            apple_tags.publisher = self.dl_options.publisher().map(|p| p.to_string());
+            apple_tags.language = self.dl_options.language().map(|l| l.to_string());
+            apple_tags.series_name = self.dl_options.series_name().map(|s| s.to_string());
+            apple_tags.series_number = self.dl_options.series_number().map(|s| s.to_string());
+            if let Some(asin) = self.dl_options.audible_product_id() {
+                apple_tags.asin = Some(asin.to_string());
+            }
+        }
+
+        Ok(())
     }
 
     fn step_get_metadata(&self, buffer: &[u8]) -> Result<AppleTags> {
@@ -176,14 +213,7 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
         let mut format = symphonia::default::get_probe().format(&hint, mss, &Default::default(), &Default::default())?.format;
 
         let mut apple_tags = self.parse_metadata(&mut *format)?;
-
-        if self.dl_options.strip_unabridged() {
-            apple_tags.title = apple_tags.title_sans_unabridged.clone();
-            apple_tags.album = apple_tags.album.map(|a| a.replace(" (Unabridged)", ""));
-        }
-
-        // TODO: Implement the rest of the metadata modifications from the C# code.
-
+        self.step_get_metadata_from_tags(&mut apple_tags)?;
         Ok(apple_tags)
     }
 
@@ -263,8 +293,65 @@ pub fn process_file(in_stream: &mut (impl Read + Seek), out_stream: &mut impl Wr
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    struct MockDownloadOptions {
+        keys: Vec<KeyData>,
+        file_type: FileType,
+        strip_unabridged: bool,
+        fixup_file: bool,
+        title: String,
+    }
+
+    impl DownloadOptions for MockDownloadOptions {
+        fn decryption_keys(&self) -> Option<&[KeyData]> {
+            Some(&self.keys)
+        }
+        fn input_type(&self) -> FileType {
+            self.file_type
+        }
+        fn strip_unabridged(&self) -> bool { self.strip_unabridged }
+        fn fixup_file(&self) -> bool { self.fixup_file }
+        fn title(&self) -> &str { &self.title }
+        fn subtitle(&self) -> Option<&str> { None }
+        fn publisher(&self) -> Option<&str> { None }
+        fn language(&self) -> Option<&str> { None }
+        fn audible_product_id(&self) -> Option<&str> { None }
+        fn series_name(&self) -> Option<&str> { None }
+        fn series_number(&self) -> Option<&str> { None }
+    }
+
     #[test]
-    fn it_works() {
-        assert!(true);
+    fn test_metadata_modification() {
+        let opts = MockDownloadOptions {
+            keys: Vec::new(),
+            file_type: FileType::Aax,
+            strip_unabridged: true,
+            fixup_file: true,
+            title: "New Title".to_string(),
+        };
+        let converter = AaxcDownloadConvertBase::new("/tmp", "/tmp", opts);
+        let mut apple_tags = AppleTags {
+            title: "Old Title (Unabridged)".to_string(),
+            title_sans_unabridged: "Old Title".to_string(),
+            album: Some("Old Album (Unabridged)".to_string()),
+            narrator: Some("Narrator".to_string()),
+            copyright: Some("(P) 2023".to_string()),
+            cover: None,
+            asin: None,
+            chapters: mpeg_util::ChapterInfo { chapters: Vec::new() },
+            subtitle: None,
+            publisher: None,
+            language: None,
+            series_name: None,
+            series_number: None,
+            apple_list_box: AppleListBox,
+        };
+        converter.step_get_metadata_from_tags(&mut apple_tags).unwrap();
+
+        assert_eq!(apple_tags.title, "New Title");
+        assert_eq!(apple_tags.album, Some("Old Album".to_string()));
+        assert_eq!(apple_tags.copyright, Some("℗ 2023".to_string()));
     }
 }
