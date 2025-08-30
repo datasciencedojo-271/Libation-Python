@@ -1,7 +1,7 @@
 use clap::Parser;
 use std::path::PathBuf;
 use std::fs::File;
-use aax_decrypter::{AaxcDownloadConvertBase, DownloadOptions, KeyData, FileType};
+use aax_decrypter::{AaxcDownloadConvertBase, DownloadOptions, KeyData, FileType, converter::Converter};
 
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
@@ -10,13 +10,17 @@ struct Cli {
     #[clap(short, long, value_parser)]
     input: PathBuf,
 
-    /// Output file
+    /// Output file or directory
     #[clap(short, long, value_parser)]
     output: PathBuf,
 
     /// Activation bytes
     #[clap(short, long, value_parser)]
     activation_bytes: String,
+
+    /// Split by chapters
+    #[clap(long)]
+    multi: bool,
 }
 
 struct CliDownloadOptions {
@@ -50,13 +54,19 @@ fn main() -> Result<(), anyhow::Error> {
         key_part2: None,
     }];
     let opts = CliDownloadOptions { keys };
-    let converter = AaxcDownloadConvertBase::new("/tmp", "/tmp", opts);
+    let converter = aax_decrypter::converter::AaxConverter {
+        base: AaxcDownloadConvertBase::new(cli.output.parent().unwrap_or(&PathBuf::from(".")), &cli.output, opts),
+    };
 
     let mut in_file = File::open(cli.input)?;
-    let mut out_file = File::create(cli.output)?;
 
-    let _buffer = converter.decrypt_to_buffer(&mut in_file)?;
-    println!("Successfully decrypted to buffer.");
+    if cli.multi {
+        // The output path is a directory for multi-file conversion
+        let _ = converter.convert_multi(&mut in_file, std::io::sink())?;
+    } else {
+        let mut out_file = File::create(cli.output)?;
+        converter.convert_single(&mut in_file, &mut out_file)?;
+    }
 
     Ok(())
 }

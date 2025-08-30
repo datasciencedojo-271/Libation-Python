@@ -4,9 +4,16 @@ use anyhow::Result;
 use std::io::Write;
 use std::mem::MaybeUninit;
 
+use symphonia::core::units::Time;
+
+pub struct Chapter {
+    pub title: String,
+    pub start_time: Time,
+}
+
 // This is a placeholder for the chapter info that is used in the C# code
 pub struct ChapterInfo {
-    pub count: usize,
+    pub chapters: Vec<Chapter>,
 }
 
 pub fn configure_lame_options(
@@ -65,8 +72,10 @@ pub fn encode_to_mp3(
     buffer: &[u8],
     mut out_stream: impl Write,
     apple_tags: &AppleTags,
+    start_time: Time,
+    end_time: Time,
 ) -> Result<()> {
-    let chapters = ChapterInfo { count: 0 };
+    let chapters = ChapterInfo { chapters: Vec::new() };
     let mut encoder = configure_lame_options(apple_tags, false, false, &chapters)?;
 
     let source = Box::new(std::io::Cursor::new(buffer.to_vec()));
@@ -75,8 +84,10 @@ pub fn encode_to_mp3(
     hint.with_extension("m4b");
     let probed = symphonia::default::get_probe().format(&hint, mss, &Default::default(), &Default::default())?;
     let mut format = probed.format;
-    let track = format.default_track().ok_or_else(|| anyhow::anyhow!("No default track found"))?;
-    let mut decoder = symphonia::default::get_codecs().make(&track.codec_params, &Default::default())?;
+    let track_id = format.default_track().ok_or_else(|| anyhow::anyhow!("No default track found"))?.id;
+    let seek_time = symphonia::core::formats::SeekTo::Time { time: start_time, track_id: Some(track_id) };
+    format.seek(symphonia::core::formats::SeekMode::Accurate, seek_time)?;
+    let mut decoder = symphonia::default::get_codecs().make(&format.tracks()[track_id as usize].codec_params, &Default::default())?;
 
     let mut mp3_buffer = [MaybeUninit::new(0); 1024 * 1024];
 
@@ -91,6 +102,10 @@ pub fn encode_to_mp3(
                 continue;
             }
         };
+
+        if Time::from(packet.ts) >= end_time {
+            break;
+        }
 
         let decoded = decoder.decode(&packet)?;
         let mut sample_buf = symphonia::core::audio::SampleBuffer::<i16>::new(decoded.capacity() as u64, *decoded.spec());

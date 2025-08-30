@@ -2,11 +2,12 @@ use std::io::{Read, Seek, Write, SeekFrom};
 use anyhow::Result;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 use symphonia::core::meta::StandardTagKey;
+use symphonia::core::units::Time;
 
 mod adrm_key_derivation;
 mod mpeg_util;
 mod atom;
-mod converter;
+pub mod converter;
 mod cue;
 
 use atom::{Atom, AavdAtom};
@@ -22,6 +23,7 @@ pub struct AppleTags {
     pub copyright: Option<String>,
     pub cover: Option<Vec<u8>>,
     pub asin: Option<String>,
+    pub chapters: mpeg_util::ChapterInfo,
     // This was a complex object in C#, for now a placeholder
     pub apple_list_box: AppleListBox,
 }
@@ -146,6 +148,13 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
             }
         }
 
+        let mut chapters = Vec::new();
+        for cue in format.cues() {
+            let title = cue.tags.iter().find(|t| t.key == "title").map(|t| t.value.to_string()).unwrap_or_default();
+            let start_time = Time::from(cue.start_ts);
+            chapters.push(mpeg_util::Chapter { title, start_time });
+        }
+
         Ok(AppleTags {
             title_sans_unabridged: title.replace(" (Unabridged)", ""),
             title,
@@ -154,6 +163,7 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
             copyright,
             cover,
             asin,
+            chapters: mpeg_util::ChapterInfo { chapters },
             apple_list_box: AppleListBox,
         })
     }
