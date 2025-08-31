@@ -17,7 +17,18 @@ impl<T: DownloadOptions> Converter<T> for AaxConverter<T> {
         let apple_tags = self.base.step_get_metadata(&buffer)?;
         let start_time = symphonia::core::units::Time::from(0u64);
         let end_time = symphonia::core::units::Time::from(u64::MAX);
-        mpeg_util::encode_to_mp3(&buffer, &mut out_stream, &apple_tags, start_time, end_time)?;
+        mpeg_util::encode_to_mp3(&buffer, &mut out_stream, &apple_tags, start_time, end_time, self.base.dl_options.lame_config())?;
+
+        if self.base.dl_options.move_moov_to_beginning() {
+            let mut file = std::fs::File::options().read(true).write(true).open("dummy.mp3")?;
+            crate::mp4_editor::move_moov_to_beginning(&mut file)?;
+        }
+
+        if self.base.dl_options.create_cue_sheet() {
+            let cue_sheet = crate::cue::create_cue_sheet(&std::path::PathBuf::from("dummy.mp3"), &apple_tags.chapters);
+            // TODO: Write cue sheet to a file
+        }
+
         Ok(())
     }
 
@@ -38,7 +49,7 @@ impl<T: DownloadOptions> Converter<T> for AaxConverter<T> {
             let out_path = self.base._out_directory.join(file_name);
             let mut out_file = std::fs::File::create(out_path)?;
 
-            mpeg_util::encode_to_mp3(&buffer, &mut out_file, &apple_tags, chapter.start_time, next_chapter_start)?;
+            mpeg_util::encode_to_mp3(&buffer, &mut out_file, &apple_tags, chapter.start_time, next_chapter_start, self.base.dl_options.lame_config())?;
         }
 
         Ok(())

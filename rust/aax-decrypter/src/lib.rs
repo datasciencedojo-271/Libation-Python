@@ -5,10 +5,11 @@ use symphonia::core::meta::StandardTagKey;
 use symphonia::core::units::Time;
 
 mod adrm_key_derivation;
-mod mpeg_util;
+pub mod mpeg_util;
 mod atom;
 pub mod converter;
 mod cue;
+mod mp4_editor;
 
 use atom::{Atom, AavdAtom};
 
@@ -54,6 +55,7 @@ pub enum FileType {
     Aaxc,
 }
 
+#[derive(Clone)]
 pub struct KeyData {
     pub key_part1: Vec<u8>,
     pub key_part2: Option<Vec<u8>>,
@@ -71,11 +73,19 @@ pub trait DownloadOptions {
     fn audible_product_id(&self) -> Option<&str>;
     fn series_name(&self) -> Option<&str>;
     fn series_number(&self) -> Option<&str>;
+    fn create_cue_sheet(&self) -> bool;
+    fn lame_config(&self) -> &mpeg_util::LameConfig;
+    fn move_moov_to_beginning(&self) -> bool;
 }
 
 // This will be a wrapper around the mp4 crate's structs
 pub struct Mp4File {
     pub apple_tags: AppleTags,
+}
+
+pub struct Progress {
+    pub percentage: f32,
+    pub message: String,
 }
 
 pub struct AaxcDownloadConvertBase<T: DownloadOptions> {
@@ -84,6 +94,7 @@ pub struct AaxcDownloadConvertBase<T: DownloadOptions> {
     dl_options: T,
     _cover_art: Option<Vec<u8>>,
     is_canceled: bool,
+    progress_callback: Option<Box<dyn Fn(Progress)>>,
 }
 
 impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
@@ -94,7 +105,13 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
             dl_options,
             _cover_art: None,
             is_canceled: false,
+            progress_callback: None,
         }
+    }
+
+    pub fn with_progress_callback(mut self, callback: Box<dyn Fn(Progress)>) -> Self {
+        self.progress_callback = Some(callback);
+        self
     }
 
     pub fn set_cover_art(&mut self, cover_art: Vec<u8>) {
@@ -124,7 +141,7 @@ impl<T: DownloadOptions> AaxcDownloadConvertBase<T> {
         };
 
         let mut out_buffer = Vec::new();
-        process_file(&mut in_stream, &mut out_buffer, &key, &iv)?;
+        process_file(&mut in_stream, &mut out_buffer, &key, &iv, &self.progress_callback)?;
         Ok(out_buffer)
     }
 
@@ -237,13 +254,26 @@ const FTYP_TAGS: [u32; 6] = [
     0x69736F6D, // ISOM
 ];
 
-pub fn process_file(in_stream: &mut (impl Read + Seek), out_stream: &mut impl Write, key: &[u8], iv: &[u8]) -> Result<()> {
+pub fn process_file(
+    in_stream: &mut (impl Read + Seek),
+    out_stream: &mut impl Write,
+    key: &[u8],
+    iv: &[u8],
+    progress_callback: &Option<Box<dyn Fn(Progress)>>,
+) -> Result<()> {
     let file_size = in_stream.seek(SeekFrom::End(0))?;
     in_stream.seek(SeekFrom::Start(0))?;
 
     let cipher = Aes128CbcDec::new(key.into(), iv.into());
 
     while in_stream.stream_position()? < file_size {
+        if let Some(callback) = progress_callback {
+            let percentage = (in_stream.stream_position()? as f32 / file_size as f32) * 100.0;
+            callback(Progress {
+                percentage,
+                message: "Decrypting...".to_string(),
+            });
+        }
         let atom = match Atom::read(in_stream)? {
             Some(atom) => atom,
             None => break,
@@ -320,6 +350,15 @@ mod tests {
         fn audible_product_id(&self) -> Option<&str> { None }
         fn series_name(&self) -> Option<&str> { None }
         fn series_number(&self) -> Option<&str> { None }
+        fn create_cue_sheet(&self) -> bool { false }
+        fn lame_config(&self) -> &mpeg_util::LameConfig {
+            &mpeg_util::LameConfig {
+                vbr: None,
+                abr_rate_kbps: 128,
+                bitrate: 128,
+            }
+        }
+        fn move_moov_to_beginning(&self) -> bool { false }
     }
 
     #[test]

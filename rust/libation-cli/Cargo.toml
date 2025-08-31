@@ -8,3 +8,4 @@ aax-decrypter = { path = "../aax-decrypter" }
 clap = { version = "4.5.4", features = ["derive"] }
 hex = "0.4.3"
 anyhow = "1.0.75"
+indicatif = "0.17.3"

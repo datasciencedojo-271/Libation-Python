@@ -1,19 +1,25 @@
 use crate::AppleTags;
-use mp3lame_encoder::{Builder, Encoder, Bitrate, Quality, BuildError, DualPcm};
+use mp3lame_encoder::{Builder, Encoder, Bitrate, Quality, BuildError, DualPcm, VbrMode};
 use anyhow::Result;
 use std::io::Write;
 use std::mem::MaybeUninit;
-
 use symphonia::core::units::Time;
 
+#[derive(Clone)]
 pub struct Chapter {
     pub title: String,
     pub start_time: Time,
 }
 
-// This is a placeholder for the chapter info that is used in the C# code
+#[derive(Clone)]
 pub struct ChapterInfo {
     pub chapters: Vec<Chapter>,
+}
+
+pub struct LameConfig {
+    pub vbr: Option<VbrMode>,
+    pub abr_rate_kbps: u32,
+    pub bitrate: u32,
 }
 
 pub fn configure_lame_options(
@@ -21,6 +27,7 @@ pub fn configure_lame_options(
     downsample: bool,
     match_source_bitrate: bool,
     _chapters: &ChapterInfo,
+    lame_config: &LameConfig,
 ) -> Result<Encoder, anyhow::Error> {
     let mut builder = Builder::new().ok_or_else(|| anyhow::anyhow!("Failed to create LAME builder"))?;
 
@@ -36,25 +43,44 @@ pub fn configure_lame_options(
         builder.set_num_channels(1).map_err(|e: BuildError| anyhow::anyhow!(e.to_string()))?;
     }
 
-    if match_source_bitrate {
-        let bitrate = match source_bitrate / 1000 {
-            320 => Bitrate::Kbps320,
-            256 => Bitrate::Kbps256,
-            224 => Bitrate::Kbps224,
-            192 => Bitrate::Kbps192,
-            160 => Bitrate::Kbps160,
-            128 => Bitrate::Kbps128,
-            112 => Bitrate::Kbps112,
-            96 => Bitrate::Kbps96,
-            80 => Bitrate::Kbps80,
-            64 => Bitrate::Kbps64,
-            56 => Bitrate::Kbps64,
-            48 => Bitrate::Kbps48,
-            40 => Bitrate::Kbps40,
-            32 => Bitrate::Kbps32,
-            _ => Bitrate::Kbps128, // Default
-        };
-        builder.set_brate(bitrate).map_err(|e: BuildError| anyhow::anyhow!(e.to_string()))?;
+    if let Some(vbr_mode) = lame_config.vbr {
+        builder.set_vbr_mode(vbr_mode).map_err(|e: BuildError| anyhow::anyhow!(e.to_string()))?;
+    } else {
+        if match_source_bitrate {
+            let bitrate = match (source_bitrate / 1000) as u32 {
+                320 => Bitrate::Kbps320,
+                256 => Bitrate::Kbps256,
+                224 => Bitrate::Kbps224,
+                192 => Bitrate::Kbps192,
+                160 => Bitrate::Kbps160,
+                128 => Bitrate::Kbps128,
+                112 => Bitrate::Kbps112,
+                96 => Bitrate::Kbps96,
+                80 => Bitrate::Kbps80,
+                64 => Bitrate::Kbps64,
+                56 => Bitrate::Kbps64,
+                48 => Bitrate::Kbps48,
+                40 => Bitrate::Kbps40,
+                32 => Bitrate::Kbps32,
+                _ => Bitrate::Kbps128, // Default
+            };
+            builder.set_brate(bitrate).map_err(|e: BuildError| anyhow::anyhow!(e.to_string()))?;
+        } else {
+            let bitrate = match lame_config.bitrate {
+                320 => Bitrate::Kbps320,
+                256 => Bitrate::Kbps256,
+                224 => Bitrate::Kbps224,
+                192 => Bitrate::Kbps192,
+                160 => Bitrate::Kbps160,
+                128 => Bitrate::Kbps128,
+                112 => Bitrate::Kbps112,
+                96 => Bitrate::Kbps96,
+                80 => Bitrate::Kbps80,
+                64 => Bitrate::Kbps64,
+                _ => Bitrate::Kbps128, // Default
+            };
+            builder.set_brate(bitrate).map_err(|e: BuildError| anyhow::anyhow!(e.to_string()))?;
+        }
     }
 
     builder.set_quality(Quality::Best).map_err(|e: BuildError| anyhow::anyhow!(e.to_string()))?;
@@ -74,9 +100,10 @@ pub fn encode_to_mp3(
     apple_tags: &AppleTags,
     start_time: Time,
     end_time: Time,
+    lame_config: &LameConfig,
 ) -> Result<()> {
     let chapters = ChapterInfo { chapters: Vec::new() };
-    let mut encoder = configure_lame_options(apple_tags, false, false, &chapters)?;
+    let mut encoder = configure_lame_options(apple_tags, false, false, &chapters, lame_config)?;
 
     let source = Box::new(std::io::Cursor::new(buffer.to_vec()));
     let mss = symphonia::core::io::MediaSourceStream::new(source, Default::default());
